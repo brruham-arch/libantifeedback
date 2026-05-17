@@ -6,28 +6,38 @@
 
 #define EXPORT __attribute__((visibility("default")))
 
-// ── JavaVM global (diisi di JNI_OnLoad) ──────────────────────────────────────
-static JavaVM* g_jvm = nullptr;
-
-// ── Toast: dijalankan di dedicated thread dengan Looper sendiri ───────────────
+// ── Toast ─────────────────────────────────────────────────────────────────────
 struct ToastArgs { char msg[256]; };
 
 static void* toast_thread(void* arg) {
     ToastArgs* ta = (ToastArgs*)arg;
-    if (!g_jvm) { delete ta; return nullptr; }
 
-    JNIEnv* env = nullptr;
-    if (g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+    // Ambil JavaVM lewat JNI_GetCreatedJavaVMs dari libandroid_runtime.so
+    void* librt = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!librt) { delete ta; return nullptr; }
+
+    auto getVMs = (jint(*)(JavaVM**, jsize, jsize*))
+                      dlsym(librt, "JNI_GetCreatedJavaVMs");
+    if (!getVMs) { delete ta; return nullptr; }
+
+    JavaVM* jvm = nullptr;
+    jsize   cnt = 0;
+    if (getVMs(&jvm, 1, &cnt) != JNI_OK || cnt == 0 || !jvm) {
         delete ta; return nullptr;
     }
 
-    // Looper.prepare() agar Toast bisa show di thread ini
+    JNIEnv* env = nullptr;
+    if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+        delete ta; return nullptr;
+    }
+
+    // Looper.prepare() — wajib agar Toast bisa show di thread ini
     jclass    clsLooper = env->FindClass("android/os/Looper");
     jmethodID midPrep   = env->GetStaticMethodID(clsLooper, "prepare", "()V");
     env->CallStaticVoidMethod(clsLooper, midPrep);
-    if (env->ExceptionCheck()) env->ExceptionClear(); // abaikan jika sudah ada looper
+    if (env->ExceptionCheck()) env->ExceptionClear();
 
-    // Ambil context via ActivityThread
+    // Context via ActivityThread.currentActivityThread().getApplication()
     jclass    clsAT     = env->FindClass("android/app/ActivityThread");
     jmethodID midCurAT  = env->GetStaticMethodID(clsAT, "currentActivityThread",
                               "()Landroid/app/ActivityThread;");
@@ -48,13 +58,12 @@ static void* toast_thread(void* arg) {
     env->CallVoidMethod(toast, midShow);
     env->DeleteLocalRef(jmsg);
 
-    g_jvm->DetachCurrentThread();
+    jvm->DetachCurrentThread();
     delete ta;
     return nullptr;
 }
 
 static void show_toast(const char* msg) {
-    if (!g_jvm) return;
     ToastArgs* ta = new ToastArgs();
     strncpy(ta->msg, msg, sizeof(ta->msg) - 1);
     ta->msg[sizeof(ta->msg) - 1] = '\0';
@@ -190,12 +199,6 @@ static void* mic_poll_thread(void*) {
 // ── Entry points ──────────────────────────────────────────────────────────────
 extern "C" {
 
-// JNI_OnLoad dipanggil saat .so di-dlopen — tangkap JavaVM di sini
-EXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
-    g_jvm = vm;
-    return JNI_VERSION_1_6;
-}
-
 EXPORT void* __GetModInfo() {
     static const char* info = "antifeedback|1.0|Auto mute SV saat mic ON|brruham";
     return (void*)info;
@@ -248,6 +251,8 @@ EXPORT void OnModLoad() {
     if (pthread_create(&tid, nullptr, mic_poll_thread, nullptr) == 0)
         pthread_detach(tid);
 
+    // Delay sedikit agar game sudah fully loaded sebelum show toast
+    usleep(500000); // 500ms
     show_toast("[AntiFeedback] Aktif");
 }
 

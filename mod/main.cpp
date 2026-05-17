@@ -11,7 +11,7 @@ static void show_toast(const char* msg) {
     void* libdvm = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
     if (!libdvm) return;
 
-    auto getJNI = (jint(*)(JavaVM**))dlsym(libdvm, "JNI_GetCreatedJavaVMs");
+    auto getJNI = (jint(*)(JavaVM**, jsize, jsize*))dlsym(libdvm, "JNI_GetCreatedJavaVMs");
     if (!getJNI) return;
 
     JavaVM* jvm = nullptr;

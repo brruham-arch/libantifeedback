@@ -1,0 +1,41 @@
+name: Build AntiFeedback
+
+on:
+  push:
+    branches: [main, dev]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup NDK r25c
+        uses: nttld/setup-ndk@v1
+        with:
+          ndk-version: r25c
+          add-to-path: true
+
+      - name: Build
+        run: |
+          $ANDROID_NDK_ROOT/ndk-build \
+            NDK_PROJECT_PATH=. \
+            APP_BUILD_SCRIPT=./jni/Android.mk \
+            NDK_APPLICATION_MK=./jni/Application.mk
+
+      - name: Verifikasi
+        run: |
+          ls -lh libs/armeabi-v7a/
+          file libs/armeabi-v7a/libantifeedback.so
+          $ANDROID_NDK_ROOT/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm \
+            -D libs/armeabi-v7a/libantifeedback.so | grep " T "
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: libantifeedback-arm32
+          path: libs/armeabi-v7a/libantifeedback.so
+          retention-days: 7

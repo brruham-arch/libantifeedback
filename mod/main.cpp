@@ -2,8 +2,54 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <jni.h>
 
 #define EXPORT __attribute__((visibility("default")))
+
+// ── Toast via JNI ─────────────────────────────────────────────────────────────
+static void show_toast(const char* msg) {
+    void* libdvm = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
+    if (!libdvm) return;
+
+    auto getJNI = (jint(*)(JavaVM**))dlsym(libdvm, "JNI_GetCreatedJavaVMs");
+    if (!getJNI) return;
+
+    JavaVM* jvm = nullptr;
+    jsize count = 0;
+    if (getJNI(&jvm, 1, &count) != JNI_OK || count == 0 || !jvm) return;
+
+    JNIEnv* env = nullptr;
+    bool attached = false;
+    if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
+        if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
+        attached = true;
+    }
+
+    // Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
+    jclass    clsToast   = env->FindClass("android/widget/Toast");
+    jclass    clsCtx     = env->FindClass("android/content/Context");
+    jmethodID midMake    = env->GetStaticMethodID(clsToast, "makeText",
+        "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
+    jmethodID midShow    = env->GetMethodID(clsToast, "show", "()V");
+
+    // Ambil Activity via ActivityThread
+    jclass    clsAT      = env->FindClass("android/app/ActivityThread");
+    jmethodID midCurAT   = env->GetStaticMethodID(clsAT, "currentActivityThread",
+        "()Landroid/app/ActivityThread;");
+    jmethodID midGetApp  = env->GetMethodID(clsAT, "getApplication",
+        "()Landroid/app/Application;");
+
+    jobject   at         = env->CallStaticObjectMethod(clsAT, midCurAT);
+    jobject   context    = env->CallObjectMethod(at, midGetApp);
+    jstring   jmsg       = env->NewStringUTF(msg);
+
+    jobject   toast      = env->CallStaticObjectMethod(clsToast, midMake,
+                               context, jmsg, 0 /*LENGTH_SHORT*/);
+    env->CallVoidMethod(toast, midShow);
+
+    env->DeleteLocalRef(jmsg);
+    if (attached) jvm->DetachCurrentThread();
+}
 
 // ── Tipe dasar BASS ──────────────────────────────────────────────────────────
 typedef unsigned int DWORD;
@@ -184,6 +230,8 @@ EXPORT void OnModLoad() {
     pthread_t tid;
     if (pthread_create(&tid, nullptr, mic_poll_thread, nullptr) == 0)
         pthread_detach(tid);
+
+    show_toast("[AntiFeedback] Aktif");
 }
 
 } // extern "C"

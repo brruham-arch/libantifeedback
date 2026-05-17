@@ -6,49 +6,63 @@
 
 #define EXPORT __attribute__((visibility("default")))
 
-// ── Toast via JNI ─────────────────────────────────────────────────────────────
-static void show_toast(const char* msg) {
-    void* libdvm = dlopen("libandroid_runtime.so", RTLD_NOW | RTLD_NOLOAD);
-    if (!libdvm) return;
+// ── JavaVM global (diisi di JNI_OnLoad) ──────────────────────────────────────
+static JavaVM* g_jvm = nullptr;
 
-    auto getJNI = (jint(*)(JavaVM**, jsize, jsize*))dlsym(libdvm, "JNI_GetCreatedJavaVMs");
-    if (!getJNI) return;
+// ── Toast: dijalankan di dedicated thread dengan Looper sendiri ───────────────
+struct ToastArgs { char msg[256]; };
 
-    JavaVM* jvm = nullptr;
-    jsize count = 0;
-    if (getJNI(&jvm, 1, &count) != JNI_OK || count == 0 || !jvm) return;
+static void* toast_thread(void* arg) {
+    ToastArgs* ta = (ToastArgs*)arg;
+    if (!g_jvm) { delete ta; return nullptr; }
 
     JNIEnv* env = nullptr;
-    bool attached = false;
-    if (jvm->GetEnv((void**)&env, JNI_VERSION_1_6) == JNI_EDETACHED) {
-        if (jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) return;
-        attached = true;
+    if (g_jvm->AttachCurrentThread(&env, nullptr) != JNI_OK) {
+        delete ta; return nullptr;
     }
 
-    // Toast.makeText(context, msg, Toast.LENGTH_SHORT).show()
-    jclass    clsToast   = env->FindClass("android/widget/Toast");
-    jclass    clsCtx     = env->FindClass("android/content/Context");
-    jmethodID midMake    = env->GetStaticMethodID(clsToast, "makeText",
-        "(Landroid/content/Context;Ljava/lang/CharSequence;I)Landroid/widget/Toast;");
-    jmethodID midShow    = env->GetMethodID(clsToast, "show", "()V");
+    // Looper.prepare() agar Toast bisa show di thread ini
+    jclass    clsLooper = env->FindClass("android/os/Looper");
+    jmethodID midPrep   = env->GetStaticMethodID(clsLooper, "prepare", "()V");
+    env->CallStaticVoidMethod(clsLooper, midPrep);
+    if (env->ExceptionCheck()) env->ExceptionClear(); // abaikan jika sudah ada looper
 
-    // Ambil Activity via ActivityThread
-    jclass    clsAT      = env->FindClass("android/app/ActivityThread");
-    jmethodID midCurAT   = env->GetStaticMethodID(clsAT, "currentActivityThread",
-        "()Landroid/app/ActivityThread;");
-    jmethodID midGetApp  = env->GetMethodID(clsAT, "getApplication",
-        "()Landroid/app/Application;");
+    // Ambil context via ActivityThread
+    jclass    clsAT     = env->FindClass("android/app/ActivityThread");
+    jmethodID midCurAT  = env->GetStaticMethodID(clsAT, "currentActivityThread",
+                              "()Landroid/app/ActivityThread;");
+    jmethodID midGetApp = env->GetMethodID(clsAT, "getApplication",
+                              "()Landroid/app/Application;");
+    jobject at      = env->CallStaticObjectMethod(clsAT, midCurAT);
+    jobject context = env->CallObjectMethod(at, midGetApp);
 
-    jobject   at         = env->CallStaticObjectMethod(clsAT, midCurAT);
-    jobject   context    = env->CallObjectMethod(at, midGetApp);
-    jstring   jmsg       = env->NewStringUTF(msg);
+    // Toast.makeText(context, msg, LENGTH_SHORT).show()
+    jclass    clsToast = env->FindClass("android/widget/Toast");
+    jmethodID midMake  = env->GetStaticMethodID(clsToast, "makeText",
+                             "(Landroid/content/Context;Ljava/lang/CharSequence;I)"
+                             "Landroid/widget/Toast;");
+    jmethodID midShow  = env->GetMethodID(clsToast, "show", "()V");
 
-    jobject   toast      = env->CallStaticObjectMethod(clsToast, midMake,
-                               context, jmsg, 0 /*LENGTH_SHORT*/);
+    jstring jmsg  = env->NewStringUTF(ta->msg);
+    jobject toast = env->CallStaticObjectMethod(clsToast, midMake, context, jmsg, 0);
     env->CallVoidMethod(toast, midShow);
-
     env->DeleteLocalRef(jmsg);
-    if (attached) jvm->DetachCurrentThread();
+
+    g_jvm->DetachCurrentThread();
+    delete ta;
+    return nullptr;
+}
+
+static void show_toast(const char* msg) {
+    if (!g_jvm) return;
+    ToastArgs* ta = new ToastArgs();
+    strncpy(ta->msg, msg, sizeof(ta->msg) - 1);
+    ta->msg[sizeof(ta->msg) - 1] = '\0';
+    pthread_t tid;
+    if (pthread_create(&tid, nullptr, toast_thread, ta) == 0)
+        pthread_detach(tid);
+    else
+        delete ta;
 }
 
 // ── Tipe dasar BASS ──────────────────────────────────────────────────────────
@@ -69,14 +83,11 @@ typedef struct {
     const char* filename;
 } BASS_CHANNELINFO;
 
-// ── Konstanta BASS ───────────────────────────────────────────────────────────
 #define BASS_ATTRIB_VOL     2
 #define BASS_CTYPE_STREAM   0x10000
 #define BASS_ACTIVE_PLAYING 1
-
-// ── Konstanta SV ─────────────────────────────────────────────────────────────
-#define SV_FREQ  48000
-#define SV_CHANS 1
+#define SV_FREQ             48000
+#define SV_CHANS            1
 
 // ── State global ─────────────────────────────────────────────────────────────
 #define MAX_SV_CHANNELS 64
@@ -178,6 +189,12 @@ static void* mic_poll_thread(void*) {
 
 // ── Entry points ──────────────────────────────────────────────────────────────
 extern "C" {
+
+// JNI_OnLoad dipanggil saat .so di-dlopen — tangkap JavaVM di sini
+EXPORT jint JNI_OnLoad(JavaVM* vm, void*) {
+    g_jvm = vm;
+    return JNI_VERSION_1_6;
+}
 
 EXPORT void* __GetModInfo() {
     static const char* info = "antifeedback|1.0|Auto mute SV saat mic ON|brruham";

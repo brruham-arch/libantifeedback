@@ -89,7 +89,7 @@ static void tw(const char* s, gw* d, int m) {
 static void draw_watermark() {
     if (!gPS || !gSC || !gSS) return;
 
-    const float X = 10.0f;
+    const float X = 30.0f;
     const float Y = 340.0f; // sesuaikan jika perlu
 
     const gw* txt = g_mic_active ? g_wide_muted : g_wide_normal;

@@ -90,7 +90,7 @@ static void draw_watermark() {
     if (!gPS || !gSC || !gSS) return;
 
     const float X = 10.0f;
-    const float Y = 240.0f; // sesuaikan jika perlu
+    const float Y = 340.0f; // sesuaikan jika perlu
 
     const gw* txt = g_mic_active ? g_wide_muted : g_wide_normal;
 
@@ -101,7 +101,7 @@ static void draw_watermark() {
     // shadow
     CRGBA shadow = {0, 0, 0, 180};
     gSC(&shadow);
-    gSS(0.5f);
+    gSS(2.0f);
     if (gSO) gSO(0);
     gPS(X + 1.5f, Y + 1.5f, txt);
 

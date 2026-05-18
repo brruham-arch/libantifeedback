@@ -2,11 +2,13 @@
 #include <dlfcn.h>
 #include <pthread.h>
 #include <unistd.h>
-#include <jni.h>
+#include <link.h>
+#include <cstdint>
 #include "mod/amlmod.h"
 
 MYMOD(brruham.antifeedback, AntiFeedback, 1.0, brruham)
 
+// ── BASS types ────────────────────────────────────────────────────────────────
 typedef unsigned int DWORD;
 typedef unsigned int HRECORD;
 typedef unsigned int HCHANNEL;
@@ -38,105 +40,129 @@ static BOOL    (*fn_ChannelGetInfo)(DWORD, BASS_CHANNELINFO*)                = n
 static BOOL    (*fn_ChannelSetAttribute)(DWORD, DWORD, float)                = nullptr;
 static DWORD   (*fn_ChannelIsActive)(DWORD)                                  = nullptr;
 
-// ── Notifikasi Android ────────────────────────────────────────────────────────
-static void show_notification(const char* title, const char* text) {
-    JNIEnv* env = aml->GetJNIEnvironment();
-    jobject ctx = aml->GetAppContextObject();
-    if (!env || !ctx) return;
+// ── GTA Text Rendering types (dari punya Riski, offset sama) ─────────────────
+struct CRGBA { unsigned char r, g, b, a; };
+typedef unsigned short gw;
 
-    // NotificationManager
-    jclass    clsCtx   = env->FindClass("android/content/Context");
-    jmethodID midGSS   = env->GetMethodID(clsCtx, "getSystemService",
-                             "(Ljava/lang/String;)Ljava/lang/Object;");
-    jstring   svcName  = env->NewStringUTF("notification");
-    jobject   nm       = env->CallObjectMethod(ctx, midGSS, svcName);
-    env->DeleteLocalRef(svcName);
-    if (!nm || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+typedef void (*fn_PS)(float, float, const gw*);
+typedef void (*fn_SC)(CRGBA*);
+typedef void (*fn_SS)(float);
+typedef void (*fn_SO)(unsigned char);
+typedef void (*fn_SD)(signed char);
+typedef void (*fn_SF)(unsigned char);
+typedef void (*fn_SE)(signed char);
+typedef void (*fn_HD)();
 
-    // NotificationChannel (Android 8+)
-    jclass    clsNM    = env->GetObjectClass(nm);
-    jstring   chanId   = env->NewStringUTF("antifeedback_ch");
+#define OFF_PS  0x5AA191u
+#define OFF_SC  0x5AAFC9u
+#define OFF_SS  0x5AB109u
+#define OFF_SO  0x5AB305u
+#define OFF_SD  0x5A8A6Du
+#define OFF_SF  0x5AB14Du
+#define OFF_SE  0x5AB27Du
+#define OFF_HD  0x43A659u
 
-    // Cek Android versi via Build.VERSION.SDK_INT
-    jclass    clsBuild = env->FindClass("android/os/Build$VERSION");
-    jfieldID  fidSDK   = env->GetStaticFieldID(clsBuild, "SDK_INT", "I");
-    jint      sdkInt   = env->GetStaticIntField(clsBuild, fidSDK);
+static fn_PS gPS   = nullptr;
+static fn_SC gSC   = nullptr;
+static fn_SS gSS   = nullptr;
+static fn_SO gSO   = nullptr;
+static fn_SD gSD   = nullptr;
+static fn_SF gSF   = nullptr;
+static fn_SE gSE   = nullptr;
+static fn_HD gOHD  = nullptr;
 
-    if (sdkInt >= 26) {
-        jclass    clsNC    = env->FindClass("android/app/NotificationChannel");
-        jstring   chanName = env->NewStringUTF("AntiFeedback");
-        // IMPORTANCE_DEFAULT = 3
-        jmethodID midNC    = env->GetMethodID(clsNC, "<init>",
-                                 "(Ljava/lang/String;Ljava/lang/CharSequence;I)V");
-        jobject   channel  = env->NewObject(clsNC, midNC, chanId, chanName, 3);
-        env->DeleteLocalRef(chanName);
+// dua buffer: state normal dan state muted
+static gw g_wide_normal[256] = {};
+static gw g_wide_muted [256] = {};
+static bool g_wm_ready = false;
 
-        jmethodID midCreateCh = env->GetMethodID(clsNM, "createNotificationChannel",
-                                    "(Landroid/app/NotificationChannel;)V");
-        env->CallVoidMethod(nm, midCreateCh, channel);
-        if (env->ExceptionCheck()) env->ExceptionClear();
-        env->DeleteLocalRef(channel);
-    }
+#define T_PTR(a) ((a) | 1u)
 
-    // Notification.Builder atau NotificationCompat — pakai Notification.Builder
-    jclass    clsBuilder;
-    jobject   builder;
-    if (sdkInt >= 26) {
-        clsBuilder = env->FindClass("android/app/Notification$Builder");
-        jmethodID midBI = env->GetMethodID(clsBuilder, "<init>",
-                              "(Landroid/content/Context;Ljava/lang/String;)V");
-        builder = env->NewObject(clsBuilder, midBI, ctx, chanId);
+// ── Helpers ───────────────────────────────────────────────────────────────────
+static void tw(const char* s, gw* d, int m) {
+    int i = 0;
+    while (*s && i < m - 1) d[i++] = (gw)(unsigned char)*s++;
+    d[i] = 0;
+}
+
+// ── Watermark ─────────────────────────────────────────────────────────────────
+static void draw_watermark() {
+    if (!gPS || !gSC || !gSS) return;
+
+    const float X = 10.0f;
+    const float Y = 240.0f; // sesuaikan jika perlu
+
+    const gw* txt = g_mic_active ? g_wide_muted : g_wide_normal;
+
+    if (gSF) gSF(1);
+    if (gSD) gSD(0);
+    if (gSE) gSE(1);
+
+    // shadow
+    CRGBA shadow = {0, 0, 0, 180};
+    gSC(&shadow);
+    gSS(0.5f);
+    if (gSO) gSO(0);
+    gPS(X + 1.5f, Y + 1.5f, txt);
+
+    // teks utama
+    if (gSE) gSE(0);
+    CRGBA color;
+    if (g_mic_active) {
+        // merah saat muted
+        color = {255, 80, 80, 255};
     } else {
-        clsBuilder = env->FindClass("android/app/Notification$Builder");
-        jmethodID midBI = env->GetMethodID(clsBuilder, "<init>",
-                              "(Landroid/content/Context;)V");
-        builder = env->NewObject(clsBuilder, midBI, ctx);
+        // hijau saat normal
+        color = {80, 255, 80, 255};
     }
-    env->DeleteLocalRef(chanId);
+    gSC(&color);
+    gSS(0.5f);
+    if (gSO) gSO(0);
+    gPS(X, Y, txt);
+}
 
-    if (!builder || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+static void hook_DrawAfterFade() {
+    if (gOHD) ((fn_HD)gOHD)();
+    if (g_wm_ready) draw_watermark();
+}
 
-    // Set title, text, icon, auto-cancel
-    jstring jTitle = env->NewStringUTF(title);
-    jstring jText  = env->NewStringUTF(text);
+// ── libGTASA base finder ──────────────────────────────────────────────────────
+static int find_gtasa_base(struct dl_phdr_info* info, size_t, void* data) {
+    if (strstr(info->dlpi_name, "libGTASA.so")) {
+        *(uintptr_t*)data = info->dlpi_addr;
+        return 1;
+    }
+    return 0;
+}
 
-    // android.R.drawable.ic_dialog_info = 0x01080020
-    auto setTitle = env->GetMethodID(clsBuilder, "setContentTitle",
-                        "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;");
-    auto setText  = env->GetMethodID(clsBuilder, "setContentText",
-                        "(Ljava/lang/CharSequence;)Landroid/app/Notification$Builder;");
-    auto setIcon  = env->GetMethodID(clsBuilder, "setSmallIcon",
-                        "(I)Landroid/app/Notification$Builder;");
-    auto setAC    = env->GetMethodID(clsBuilder, "setAutoCancel",
-                        "(Z)Landroid/app/Notification$Builder;");
-    auto setOngoing = env->GetMethodID(clsBuilder, "setOngoing",
-                          "(Z)Landroid/app/Notification$Builder;");
+// ── Init thread (watermark + hook DrawAfterFade) ──────────────────────────────
+static void* wm_init_thread(void*) {
+    uintptr_t base = 0;
+    while (base == 0) {
+        dl_iterate_phdr(find_gtasa_base, &base);
+        sleep(1);
+    }
+    sleep(5); // tunggu memori game siap
 
-    env->CallObjectMethod(builder, setTitle, jTitle);
-    env->CallObjectMethod(builder, setText,  jText);
-    env->CallObjectMethod(builder, setIcon,  0x01080020); // ic_dialog_info
-    env->CallObjectMethod(builder, setAC,    (jboolean)0);
-    env->CallObjectMethod(builder, setOngoing, (jboolean)1); // persistent
-    if (env->ExceptionCheck()) env->ExceptionClear();
+    void* hDobby = dlopen("libdobby.so", RTLD_NOW | RTLD_GLOBAL);
+    if (!hDobby) return nullptr;
+    auto dobbyHook = (int(*)(void*, void*, void**))dlsym(hDobby, "DobbyHook");
+    if (!dobbyHook) return nullptr;
 
-    env->DeleteLocalRef(jTitle);
-    env->DeleteLocalRef(jText);
+    gSC = (fn_SC)T_PTR(base + OFF_SC);
+    gSS = (fn_SS)T_PTR(base + OFF_SS);
+    gSO = (fn_SO)T_PTR(base + OFF_SO);
+    gSD = (fn_SD)T_PTR(base + OFF_SD);
+    gSF = (fn_SF)T_PTR(base + OFF_SF);
+    gSE = (fn_SE)T_PTR(base + OFF_SE);
+    gPS = (fn_PS)T_PTR(base + OFF_PS);
 
-    // Build notifikasi
-    jmethodID midBuild = env->GetMethodID(clsBuilder, "build",
-                             "()Landroid/app/Notification;");
-    jobject notif = env->CallObjectMethod(builder, midBuild);
-    if (!notif || env->ExceptionCheck()) { env->ExceptionClear(); return; }
+    void* target = (void*)T_PTR(base + OFF_HD);
+    if (dobbyHook(target, (void*)hook_DrawAfterFade, (void**)&gOHD) == 0) {
+        g_wm_ready = true;
+    }
 
-    // notify(id, notification)
-    jmethodID midNotify = env->GetMethodID(clsNM, "notify",
-                              "(ILandroid/app/Notification;)V");
-    env->CallVoidMethod(nm, midNotify, (jint)1001, notif);
-    if (env->ExceptionCheck()) env->ExceptionClear();
-
-    env->DeleteLocalRef(notif);
-    env->DeleteLocalRef(builder);
-    env->DeleteLocalRef(nm);
+    return nullptr;
 }
 
 // ── BASS helpers ──────────────────────────────────────────────────────────────
@@ -165,7 +191,7 @@ static void set_sv_volume(float vol) {
     pthread_mutex_unlock(&g_mutex);
 }
 
-// ── Hooks ─────────────────────────────────────────────────────────────────────
+// ── BASS hooks ────────────────────────────────────────────────────────────────
 static HRECORD hook_RecordStart(DWORD freq, DWORD chans, DWORD flags, RECORDPROC* proc, void* user) {
     HRECORD h = orig_RecordStart(freq, chans, flags, proc, user);
     g_rec_handle = h;
@@ -185,7 +211,7 @@ static BOOL hook_ChannelFree(DWORD handle) {
     return orig_ChannelFree(handle);
 }
 
-// ── Polling thread ────────────────────────────────────────────────────────────
+// ── Mic polling thread ────────────────────────────────────────────────────────
 static void* mic_poll_thread(void*) {
     int last_mic = 0;
     while (1) {
@@ -199,10 +225,16 @@ static void* mic_poll_thread(void*) {
     return nullptr;
 }
 
-// ── Entry points ──────────────────────────────────────────────────────────────
+// ── AML Entry points ──────────────────────────────────────────────────────────
 ON_MOD_PRELOAD() {
     memset(g_sv_channels, 0, sizeof(g_sv_channels));
-    g_sv_count = 0; g_rec_handle = 0; g_mic_active = 0;
+    g_sv_count   = 0;
+    g_rec_handle = 0;
+    g_mic_active = 0;
+    g_wm_ready   = false;
+
+    tw("[AntiFeedback] Speaker: ON",   g_wide_normal, 256);
+    tw("[AntiFeedback] Speaker: MUTED", g_wide_muted,  256);
 }
 
 ON_MOD_LOAD() {
@@ -216,12 +248,12 @@ ON_MOD_LOAD() {
     if (!hBASS) return;
 
     struct { const char* name; void** out; } syms[] = {
-        { "BASS_RecordStart",        (void**)&orig_RecordStart       },
-        { "BASS_ChannelPlay",        (void**)&orig_ChannelPlay       },
-        { "BASS_ChannelFree",        (void**)&orig_ChannelFree       },
-        { "BASS_ChannelGetInfo",     (void**)&fn_ChannelGetInfo      },
-        { "BASS_ChannelSetAttribute",(void**)&fn_ChannelSetAttribute },
-        { "BASS_ChannelIsActive",    (void**)&fn_ChannelIsActive     },
+        { "BASS_RecordStart",         (void**)&orig_RecordStart       },
+        { "BASS_ChannelPlay",         (void**)&orig_ChannelPlay       },
+        { "BASS_ChannelFree",         (void**)&orig_ChannelFree       },
+        { "BASS_ChannelGetInfo",      (void**)&fn_ChannelGetInfo      },
+        { "BASS_ChannelSetAttribute", (void**)&fn_ChannelSetAttribute },
+        { "BASS_ChannelIsActive",     (void**)&fn_ChannelIsActive     },
     };
     for (auto& s : syms) {
         void* addr = resolver("libBASS.so", s.name);
@@ -229,19 +261,24 @@ ON_MOD_LOAD() {
         *s.out = addr;
     }
 
-    struct { void* addr; void* hook; void** orig; } hooks[] = {
+    struct { void* addr; void* hook; void** orig; } bass_hooks[] = {
         { (void*)orig_RecordStart, (void*)hook_RecordStart, (void**)&orig_RecordStart },
         { (void*)orig_ChannelPlay, (void*)hook_ChannelPlay, (void**)&orig_ChannelPlay },
         { (void*)orig_ChannelFree, (void*)hook_ChannelFree, (void**)&orig_ChannelFree },
     };
-    for (auto& hk : hooks) {
+    for (auto& hk : bass_hooks) {
         if (dobbyHook(hk.addr, hk.hook, hk.orig) != 0) return;
     }
 
-    pthread_t tid;
-    if (pthread_create(&tid, nullptr, mic_poll_thread, nullptr) == 0)
-        pthread_detach(tid);
+    // thread mic polling
+    pthread_t tid_mic;
+    if (pthread_create(&tid_mic, nullptr, mic_poll_thread, nullptr) == 0)
+        pthread_detach(tid_mic);
+
+    // thread init watermark + hook DrawAfterFade
+    pthread_t tid_wm;
+    if (pthread_create(&tid_wm, nullptr, wm_init_thread, nullptr) == 0)
+        pthread_detach(tid_wm);
 
     aml->ShowToast(false, "[AntiFeedback] Aktif");
-    show_notification("AntiFeedback", "Mod aktif - speaker otomatis mute saat mic ON");
 }

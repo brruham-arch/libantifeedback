@@ -116,7 +116,7 @@ static void draw_watermark() {
         color = {80, 255, 80, 255};
     }
     gSC(&color);
-    gSS(0.5f);
+    gSS(2.0f);
     if (gSO) gSO(0);
     gPS(X, Y, txt);
 }

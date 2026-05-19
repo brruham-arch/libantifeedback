@@ -89,7 +89,7 @@ static void tw(const char* s, gw* d, int m) {
 static void draw_watermark() {
     if (!gPS || !gSC || !gSS) return;
 
-    const float X = 130.0f;
+    const float X = 150.0f;
     const float Y = 340.0f;
 
     const gw* txt = g_mic_active ? g_wide_muted : g_wide_normal;
@@ -243,8 +243,8 @@ ON_MOD_PRELOAD() {
     g_wm_ready   = false;
 
     // FIX 4: teks berbeda untuk tiap state
-    tw("[AntiFeedback] Speaker: ON",    g_wide_normal, 256);
-    tw("[AntiFeedback] Speaker: MUTED", g_wide_muted,  256);
+    tw("[AntiFeedback]",    g_wide_normal, 256);
+    tw("[AntiFeedback]", g_wide_muted,  256);
 }
 
 ON_MOD_LOAD() {
